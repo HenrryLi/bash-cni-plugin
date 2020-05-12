@@ -1,0 +1,84 @@
+#!/bin/bash -e
+
+if [[ ${DEBUG} -gt 0 ]]; then set -x; fi
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec &>> /var/log/bash-cni-plugin.log
+
+IP_STORE=/tmp/reserved_ips # all reserved ips will be stored there
+
+echo "CNI command: $0 $CNI_COMMAND"
+echo "CNI_ARGS:$CNI_ARGS"
+
+for var in ${CNI_ARGS//;/ }; do
+  export $var
+done
+
+echo "K8S_POD_NAME: ${K8S_POD_NAME}"
+echo "K8S_POD_NAMESPACE: ${K8S_POD_NAMESPACE}"
+
+#replace the pod_name from "-" to "_"
+export NEW_K8S_POD_NAME=${K8S_POD_NAME/-/_}
+echo "NEW_K8S_POD_NAME: ${NEW_K8S_POD_NAME}"
+
+stdin=`cat /dev/stdin`
+echo "stdin: $stdin"
+
+static_ipconfig=$(echo "$stdin" | jq -r ".static_ipconfig")
+kubeconfig=$(echo "$stdin" | jq -r ".kubeconfig")
+
+ipconfig=`kubectl get configmaps $static_ipconfig -o=jsonpath='{.data.pod_static_ips}' --kubeconfig=$kubeconfig 2>/dev/null`
+$ipconfig
+pod_ip=${!NEW_K8S_POD_NAME}
+
+case $CNI_COMMAND in
+ADD)
+    if [ "$pod_ip" ]; then
+	    echo "kubectl annotate --overwrite pods $K8S_POD_NAME  cni.projectcalico.org/ipAddrs=[\"${pod_ip}\"] -n $K8S_POD_NAMESPACE --kubeconfig=/root/.kube/config "
+	    kubectl annotate --overwrite pods $K8S_POD_NAME  cni.projectcalico.org/ipAddrs=[\"${pod_ip}\"] -n $K8S_POD_NAMESPACE --kubeconfig=/root/.kube/config  2>&1 > /dev/null
+    fi
+
+echo "{
+  \"cniVersion\": \"0.3.1\",
+  \"interfaces\": [
+      {
+          \"name\": \"eth0\",
+          \"mac\": \"ee:ee:ee:ee:ee:ee\",
+          \"sandbox\": \"192.168.0.1\"
+      }
+  ],
+  \"ips\": [
+      {
+          \"version\": \"4\",
+          \"address\": \"127.0.0.1/32\",
+          \"interface\": 0
+      }
+  ]
+}" >&3
+
+;;
+
+
+DEL)
+        echo "delete  $K8S_POD_NAME" 
+;;
+
+GET)
+        echo "GET not supported"
+        exit 1
+;;
+
+VERSION)
+echo '{
+  "cniVersion": "0.3.1",
+  "supportedVersions": [ "0.3.0", "0.3.1", "0.4.0" ]
+}' >&3
+;;
+
+*)
+  echo "Unknown cni commandn: $CNI_COMMAND"
+  exit 1
+;;
+
+esac
+
